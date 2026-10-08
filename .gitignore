@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+log/
+outputs/
+outputs_*/
+*.tif
+*.npy
+!requirements.txt
