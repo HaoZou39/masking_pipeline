@@ -13,10 +13,12 @@ Mask2Former. Official bundle files are published only after QA passes.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import shutil
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -62,6 +64,52 @@ DEFAULT_OSM_PBF = os.path.join(SCRIPT_DIR, "data", "regional", "zhejiang-261020.
 DEFAULT_DEM = os.path.join(SCRIPT_DIR, "data", "regional", "wenzhou.tif")
 DEFAULT_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 
+_ACTIVE_BENCHMARK: ContextVar[Optional[dict]] = ContextVar("site_benchmark", default=None)
+
+
+def benchmarked_pipeline(fn):
+    """Persist wall-clock timing, including failed runs and cache reuse."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        started = time.perf_counter()
+        context = {
+            "schema_version": "1.0",
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+            "mode": "cold" if kwargs.get("fresh") else ("resume" if kwargs.get("resume") else "standard"),
+            "status": "running",
+            "stages": [],
+        }
+        token = _ACTIVE_BENCHMARK.set(context)
+        try:
+            result = fn(*args, **kwargs)
+            context["status"] = "passed"
+            return result
+        except BaseException as exc:
+            context["status"] = "failed"
+            context["error"] = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            context["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+            context["total_wall_seconds"] = round(time.perf_counter() - started, 3)
+            context["computed_stage_seconds"] = round(sum(
+                item["elapsed_seconds"] for item in context["stages"] if item["status"] == "passed"
+            ), 3)
+            site_dir = context.get("site_dir")
+            if site_dir:
+                try:
+                    os.makedirs(site_dir, exist_ok=True)
+                    report_path = os.path.join(site_dir, "timing_report.json")
+                    with open(report_path + ".tmp", "w", encoding="utf-8") as handle:
+                        json.dump(context, handle, ensure_ascii=False, indent=2)
+                    os.replace(report_path + ".tmp", report_path)
+                    print(f"Timing report: {report_path}")
+                    print(f"Total wall time: {context['total_wall_seconds']:.1f}s ({context['status']})")
+                except OSError as report_error:
+                    print(f"WARNING: failed to write timing report: {report_error}")
+            _ACTIVE_BENCHMARK.reset(token)
+    return wrapper
+
+
 
 def build_stem(lat: float, lon: float, radius_km: float, zoom: int, crop: bool = True) -> str:
     return (
@@ -101,10 +149,18 @@ def _stage(name: str, fn):
     print(f"\n>>> [{name}] start")
     try:
         value = fn()
-    except Exception:
-        print(f">>> [{name}] FAILED after {time.perf_counter() - started:.1f}s")
+    except Exception as exc:
+        elapsed = time.perf_counter() - started
+        context = _ACTIVE_BENCHMARK.get()
+        if context is not None:
+            context["stages"].append({"stage": name, "status": "failed", "elapsed_seconds": round(elapsed, 3), "error": str(exc)})
+        print(f">>> [{name}] FAILED after {elapsed:.1f}s")
         raise
-    print(f">>> [{name}] done in {time.perf_counter() - started:.1f}s")
+    elapsed = time.perf_counter() - started
+    context = _ACTIVE_BENCHMARK.get()
+    if context is not None:
+        context["stages"].append({"stage": name, "status": "passed", "elapsed_seconds": round(elapsed, 3)})
+    print(f">>> [{name}] done in {elapsed:.1f}s")
     return value
 
 
@@ -113,6 +169,9 @@ def _reuse(output_dir: str, resume: bool, stage: str, params: dict, files: list)
         return False
     ok, reason = stage_is_reusable(load_manifest(output_dir), stage, params, files)
     if ok:
+        context = _ACTIVE_BENCHMARK.get()
+        if context is not None:
+            context["stages"].append({"stage": stage, "status": "reused", "elapsed_seconds": 0.0})
         print(f"\n>>> [{stage}] reused existing output ({reason})")
         return True
     print(f"\n>>> [{stage}] cache rejected: {reason}")
@@ -184,6 +243,7 @@ def _adopt_satellite(paths: dict, source: str, preview: Optional[str], note: str
         )
 
 
+@benchmarked_pipeline
 def run_pipeline(
     lat: float,
     lon: float,
@@ -206,7 +266,10 @@ def run_pipeline(
     resume: bool = False,
     allow_incomplete_tiles: bool = False,
     keep_intermediates: bool = False,
+    fresh: bool = False,
 ) -> dict:
+    if fresh and (resume or step != "all"):
+        raise ValueError("--fresh requires --step all and cannot be combined with --resume")
     if step == "bundle":
         step = "export"
     params = canonical_parameters(
@@ -223,6 +286,15 @@ def run_pipeline(
     )
     assert_site_identity(site_dir, site_id, params)
     paths = build_site_paths(site_id, site_dir=site_dir)
+    context = _ACTIVE_BENCHMARK.get()
+    if context is not None:
+        context["site_dir"] = site_dir
+        context["site_id"] = site_id
+        context["site_name"] = params["site_name"]
+        context["location"] = {"lat": params["lat"], "lon": params["lon"], "radius_km": params["radius_km"]}
+        context["settings"] = {"zoom": params["zoom"], "grid": [params["target_height"], params["target_width"]], "road_buffer_m": params["road_buffer_m"]}
+    if fresh and (os.path.isdir(paths["bundle_dir"]) or os.path.isfile(paths["manifest"])):
+        raise RuntimeError("--fresh requires an unused output directory; choose a new --output-root")
     os.makedirs(paths["cache_dir"], exist_ok=True)
     os.makedirs(paths["previews_dir"], exist_ok=True)
     osm_pbf = os.path.abspath(osm_pbf or DEFAULT_OSM_PBF)
@@ -272,7 +344,7 @@ def run_pipeline(
             reused.append("download")
         else:
             adopted = None
-            for candidate in _legacy_satellite_candidates(stem):
+            for candidate in ([] if fresh else _legacy_satellite_candidates(stem)):
                 if os.path.isfile(candidate) and _satellite_matches(candidate, params["lat"], params["lon"], params["radius_km"]):
                     adopted = candidate
                     break
@@ -287,6 +359,8 @@ def run_pipeline(
                 record_stage(site_dir, "download", download_params, [tif_path])
                 print(f"Reused satellite GeoTIFF: {adopted}")
                 reused.append("satellite_geotiff")
+                if context is not None:
+                    context["stages"].append({"stage": "download", "status": "adopted", "elapsed_seconds": 0.0, "source": adopted})
                 results["geotiff"] = tif_path
             else:
                 def _download():
@@ -537,6 +611,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--road-buffer-m", type=float, default=500, help="Extra OSM extent in satellite CRS metres")
     parser.add_argument("--max-outside-m", type=float, default=1500)
     parser.add_argument("--resume", action="store_true", help="Reuse a stage only when its parameters and files match")
+    parser.add_argument("--fresh", action="store_true", help="Benchmark all stages from scratch with no cached/legacy satellite reuse; choose a new output root")
     parser.add_argument("--keep-intermediates", action="store_true", help="Keep the staging directory after a successful publish")
     parser.add_argument("--no-overwrite", action="store_true")
     parser.add_argument("--no-fullres-render", action="store_true")
@@ -569,6 +644,7 @@ def main() -> None:
             resume=args.resume,
             allow_incomplete_tiles=args.allow_incomplete_tiles,
             keep_intermediates=args.keep_intermediates,
+            fresh=args.fresh,
         )
     except NamingError as exc:
         raise SystemExit(f"ERROR: {exc}") from exc
