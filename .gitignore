@@ -5,7 +5,11 @@ log/
 outputs/
 outputs_*/
 *.tif
-*.npy
 *.pbf
-data/
+*.npy
+data/*
+!data/regional/
+data/regional/*
+!data/regional/wenzhou.tif
+!data/regional/zhejiang-261020.osm.pbf
 !requirements.txt

@@ -7,7 +7,7 @@
 ## 流程
 
 ```
-坐标 (lat, lon) + 本地浙江 OSM / DEM
+坐标 (lat, lon) + 浙江 OSM / 温州 DEM
     │
     ▼
 [1] download.py     下载 ESRI World Imagery → EPSG:3857 GeoTIFF
@@ -28,13 +28,14 @@
 
 `radius-km` 是 Web Mercator 下正方形的半边长（乘 1000 为投影米），不是大地测量半径。道路缓冲 `--road-buffer-m` 也是卫星 CRS 里的投影距离，不是精确地表距离。
 
-区域底库不入库，放到 `data/regional/`：
+区域底库在 `data/regional/`。流水线默认读下面两份，并随仓库提供：
 
 ```text
 data/regional/zhejiang-261020.osm.pbf
-data/regional/zhejiang.tif
-data/regional/zhejiang.tif.aux.xml
+data/regional/wenzhou.tif
 ```
+
+`wenzhou.tif` 是温州附近高程（约东经 119.45°–121.50°、北纬 27.14°–28.80°）。南边界停在全省 DEM 的覆盖尽头，大约 27.14°N。全省 `zhejiang.tif` 约 500MB，不入库。
 
 路由粗类别 (`ROUTE_CLASSES`):
 
@@ -86,7 +87,7 @@ python run.py \
   --target-height 1800 \
   --target-width 1800 \
   --osm-pbf data/regional/zhejiang-261020.osm.pbf \
-  --dem-source data/regional/zhejiang.tif \
+  --dem-source data/regional/wenzhou.tif \
   --road-buffer-m 500 \
   --output-root outputs \
   --step all

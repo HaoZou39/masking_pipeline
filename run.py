@@ -59,7 +59,7 @@ except ImportError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OSM_PBF = os.path.join(SCRIPT_DIR, "data", "regional", "zhejiang-261020.osm.pbf")
-DEFAULT_DEM = os.path.join(SCRIPT_DIR, "data", "regional", "zhejiang.tif")
+DEFAULT_DEM = os.path.join(SCRIPT_DIR, "data", "regional", "wenzhou.tif")
 DEFAULT_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 
 
