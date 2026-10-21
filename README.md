@@ -107,6 +107,28 @@ python run.py --lat 27.501662 --lon 120.194639 --output-dir outputs/cangnan_test
 python run.py --lat 27.55 --lon 120.38 --hf-endpoint ""
 ```
 
+## 新地区全流程耗时实测
+
+用 `--fresh` 在**全新输出目录**中从零执行所有步骤（禁止复用旧苍南卫星影像或阶段缓存）。这才是新地区下载和分割的冷启动性能数据，而不是 `--resume` 的增量耗时。
+
+```bash
+# 在装有 GPU、能够访问 Esri/HuggingFace 的 route_plan 环境运行
+python run.py \
+  --site-name yongjia \
+  --lat 28.291216 --lon 120.709407 \
+  --radius-km 0.9 --zoom 18 \
+  --target-height 1800 --target-width 1800 \
+  --road-buffer-m 500 \
+  --osm-pbf data/regional/zhejiang-261020.osm.pbf \
+  --dem-source data/regional/wenzhou.tif \
+  --output-root outputs/benchmarks/yongjia_cold_run_01 \
+  --step all --fresh
+```
+
+每次运行在对应 `outputs/<root>/<site_id>/timing_report.json` 生成阶段计时报告，记录 `download`、`osm`、`dem`、`segment`、`downsample`、`export` 的实际耗时、是否缓存复用、总墙钟耗时，以及失败阶段；失败时也会保存已产生的计时数据。
+
+`--fresh` 需要未使用的输出目录，不能与 `--resume` 同时使用，不接受单阶段执行。重复测试时应使用新的输出目录（例如 `yongjia_cold_run_02`）。**没有真实运行就没有可引用的时间数据。** 对于正常的缓存运行，不要把 `reused` 阶段的零秒误认为模型在零秒内完成推理。
+
 ## 标准输出
 
 `site_id` 由 `naming.py` 统一生成。苍南示例：
