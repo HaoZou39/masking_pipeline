@@ -85,6 +85,28 @@ class OutputMetadata:
     output_preview_png: str
     output_metadata_json: str
     output_geotiff_wgs84: Optional[str] = None
+    tiles_requested: int = 0
+    tiles_succeeded: int = 0
+    failed_tiles: Optional[List[Dict]] = None
+    coverage_complete: bool = True
+
+
+def enforce_tile_coverage(requested: int, succeeded: int, failed: List[Dict], allow_incomplete: bool) -> None:
+    """Refuse a mosaic that still contains placeholder pixels for failed tiles."""
+    if requested <= 0:
+        raise RuntimeError("No satellite tiles were requested.")
+    if succeeded <= 0:
+        raise RuntimeError("Failed to download all tiles; zero valid tiles received.")
+    if failed and not allow_incomplete:
+        sample = "; ".join(
+            f"z{item.get('z')}/{item.get('x')}/{item.get('y')}: {item.get('error')}"
+            for item in failed[:8]
+        )
+        raise RuntimeError(
+            f"Incomplete satellite coverage: {len(failed)}/{requested} tiles failed. "
+            "Refusing to build a GeoTIFF that still contains placeholder pixels. "
+            f"{sample}"
+        )
 
 
 def lonlat_to_webmercator(lon: float, lat: float) -> Tuple[float, float]:
@@ -276,6 +298,7 @@ def download_satellite_geotiff(
     also_save_wgs84: bool = False,
     save_preview: bool = True,
     overwrite: bool = True,
+    allow_incomplete: bool = False,
 ) -> OutputMetadata:
     """Download XYZ satellite tiles around (center_lat, center_lon) and save GeoTIFF."""
     if not HAS_RASTERIO:
@@ -319,6 +342,7 @@ def download_satellite_geotiff(
             tasks.append((x_min + ix, y_min + iy, ix, iy))
 
     ok = 0
+    failed: List[Dict] = []
     session = make_session()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
@@ -326,17 +350,24 @@ def download_satellite_geotiff(
             for (x, y, ix, iy) in tasks
         }
         for i, fut in enumerate(as_completed(futures), start=1):
+            x, y, _ix, _iy = futures[fut]
             result, arr = fut.result()
             if result.ok and arr is not None:
                 r0 = result.iy * TILE_SIZE
                 c0 = result.ix * TILE_SIZE
                 mosaic[r0:r0 + TILE_SIZE, c0:c0 + TILE_SIZE] = arr
                 ok += 1
+            else:
+                failed.append({"z": zoom, "x": int(x), "y": int(y), "error": result.error})
             if i % 50 == 0 or i == len(tasks):
-                print(f"  downloaded {i}/{len(tasks)} tiles, success={ok}")
+                print(f"  downloaded {i}/{len(tasks)} tiles, success={ok}, failed={len(failed)}")
 
-    if ok == 0:
-        raise RuntimeError("Failed to download all tiles; zero valid tiles received.")
+    if failed and not allow_incomplete:
+        failure_path = os.path.join(output_dir, "tile_failures.json")
+        with open(failure_path, "w", encoding="utf-8") as handle:
+            json.dump({"requested": len(tasks), "succeeded": ok, "failed_tiles": failed}, handle, indent=2)
+        print(f"Wrote tile failure report: {failure_path}")
+    enforce_tile_coverage(len(tasks), ok, failed, allow_incomplete)
 
     if crop_to_request:
         col0 = max(0, int(math.floor((req_left - full_left) / px_size)))
@@ -398,6 +429,10 @@ def download_satellite_geotiff(
         output_preview_png=png_path,
         output_metadata_json=json_path,
         output_geotiff_wgs84=tif_wgs84_path,
+        tiles_requested=len(tasks),
+        tiles_succeeded=ok,
+        failed_tiles=failed,
+        coverage_complete=not failed,
     )
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(asdict(meta), f, ensure_ascii=False, indent=2)

@@ -6,4 +6,6 @@ outputs/
 outputs_*/
 *.tif
 *.npy
+*.pbf
+data/
 !requirements.txt
